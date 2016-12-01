@@ -46,8 +46,8 @@ String code;
 WiFiServer server(serverPort);
 
 //*-- IoT Information
-const char* _SSID = "bbk"; // previously [const char* SSID = "xxxxxx";] seems SSID now is an reserved constant, so I added "_"
-const char* _PASS = "internet";//not sure but seems similar to anterior I added "_"  to avoid conflict
+const char* _SSID = "SSID_name"; // previously [const char* SSID = "xxxxxx";] seems SSID now is an reserved constant, so I added "_"
+const char* _PASS = "internet_password";//not sure but seems similar to anterior I added "_"  to avoid conflict
 const char* pass_sent = "1234";
 char codeOK='0';//start Code is blank....
 
