@@ -1,0 +1,236 @@
+// http://www.esp8266.com/viewtopic.php?f=29&t=2696&start=8
+#include "Arduino.h" 
+
+/* IoT Garage Door Opener
+/ This is a sketch for the ESP8266, ESP-12 in my case, using the Arduino IDE for ESP8266.  This sketch will allow you to see the current
+/ state of the garage door using a magnetic switch on the garage door, one side connected to pin 4 of the ESP-12 and the other side
+/ connected to ground.  Doing this pulls pin 4 LOW when the Garage Door is closed completely.  The webpage updates (doesn't reload) via AJAX every 1 second
+/ in order to update the status of the door.  It is possible to add another magnetic switch to show when the door is fully open by
+/ tieing it to another pin the same way.  You would have to add the code for the new pin.
+/ Activating the button for the door requires a 4 digit pass code.  If you put in the code and then close the browser or app you are using
+/ and then log back on you will have to re-enter the code again.  That is done in case you enter the code and close the browser and someone else logs on.
+/ They would be able to activate the door since the ESP would still think that codeOK=1.  Each client connect sets codeOK=0 right off the bat.
+/
+/ To open the door I am using a High level triggered single 5V relay.  I am pulling pin 5 LOW in setup then high for 1 second to
+/ trigger the door.  ESP is on a smd adapter with onboard LDO (5v to 3.3V voltage regultor) from Electrodragon. I am powering the ESP and the relay using a 5V 1A power adapter.
+/
+/ I am using watchdog to detect any crashes and hopefully restart the software.  I am not completely sure the watchdog works yet.
+/ I hope they mplement watchdog interrupt capability in the near future.
+
+/ Nicu FLORICA (niq_ro) from http://www.tehnic.go.ro 
+/ & http://www.arduinotehniq.com add few feature ...
+/ good ideea is to autoreconnect the ESP8266 board in wi-fi network
+/ original is from http://www.esp8266.com/viewtopic.php?f=32&t=8286
+/ for WIFI RECONNECT AFTER WIFI ROUTER DISCONNECT
+/ (see also http://www.instructables.com/id/ESP8266-Weather-Widget/ )
+
+*/
+#include <EEPROM.h> // http://www.esp8266.com/wiki/doku.php?id=arduino-docs
+#include <ESP8266WiFi.h>
+
+extern "C" {
+  #include "user_interface.h"
+}
+ 
+int openClosePin = 5;
+int errorPin = 12;
+int serverPort = 8087;// server port
+int openClose = 0;
+
+String HTTP_req;
+String code;
+
+WiFiServer server(serverPort);
+
+//*-- IoT Information
+const char* _SSID = "bbk"; // previously [const char* SSID = "xxxxxx";] seems SSID now is an reserved constant, so I added "_"
+const char* _PASS = "internet";//not sure but seems similar to anterior I added "_"  to avoid conflict
+const char* pass_sent = "1234";
+char codeOK='0';//start Code is blank....
+
+int clicuri = 0;
+
+void setup() {
+    pinMode(openClosePin, OUTPUT);
+    digitalWrite(openClosePin, LOW);
+    pinMode(errorPin, OUTPUT);
+//    digitalWrite(openClosePin, HIGH);
+//Init EEPROM, note the size requirement. I believe 4096B is the maximum available.
+//You could use a smaller amount/size.
+EEPROM.begin(4096);
+    openClose = EEPROM.read(100);
+    clicuri = EEPROM.read(101);
+if (openClose <0 || openClose >1) openClose = 0;
+if (clicuri <0 || clicuri >255) clicuri = 0;
+    digitalWrite(openClosePin, openClose);
+    delay(50);
+ESP.wdtDisable();
+    Serial.begin(115200);
+  WIFI_Connect();   
+    delay(1000);
+    ESP.wdtEnable(WDTO_4S);
+    //Start the server
+    server.begin();
+    Serial.println("Server started");
+   
+    //Print the IP Address
+    Serial.print("Use this URL to connect: ");
+    Serial.print("http://");
+    Serial.print(WiFi.localIP());
+    Serial.print(":");
+    Serial.print(serverPort,DEC);
+    Serial.println("/");
+
+    delay(1000);
+}
+
+void loop() {
+ if (WiFi.status() != WL_CONNECTED)
+    {
+      digitalWrite(errorPin, HIGH);
+      WIFI_Connect();
+    } else {
+      digitalWrite(errorPin, LOW);
+    }
+  
+  // Check if a client has connected
+  WiFiClient client = server.available();
+ 
+  if (!client) {
+    return;
+  }
+
+  Serial.println("found client");
+ 
+  // Return the response
+  boolean currentLineIsBlank = true;
+  codeOK='0';
+  while (client.connected()) {
+    if (client.available()) {   // client data available to read
+      char c = client.read(); // read 1 byte (character) from client
+      HTTP_req += c;  // save the HTTP request 1 char at a time
+      // last line of client request is blank and ends with \n
+      // respond to client only after last line received
+      if (c == '\n' && currentLineIsBlank) {
+        client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: keep-alive");
+        client.println();
+        if (HTTP_req.indexOf("ajax_switch") > -1) {
+          // read switch state and send appropriate paragraph text
+          GetSwitchState(client);
+          delay(0);
+        }
+        else {  // HTTP request for web page
+          // send web page - contains JavaScript with AJAX calls
+          client.print("<!DOCTYPE html>\r\n<html>\r\n<head>\r\n<title>ESP8266 Switch control</title>\r\n<meta name='viewport' content='width=device-width', initial-scale='1'>");
+          client.print("<script>\r\nfunction GetSwitchState() {\r\nnocache = \"&nocache=\" + Math.random() * 1000000;\r\nvar request = new XMLHttpRequest();\r\nrequest.onreadystatechange = function() {\r\nif (this.readyState == 4) {\r\nif (this.status == 200) {\r\nif (this.responseText != null) {\r\ndocument.getElementById(\"switch_txt\").innerHTML = this.responseText;\r\n}}}}\r\nrequest.open(\"GET\", \"ajax_switch\" + nocache, true);\r\nrequest.send(null);\r\nsetTimeout('GetSwitchState()', 1000);\r\n}\r\n</script>\n");
+          client.print("<script>\r\nfunction DoorActivate() {\r\nvar request = new XMLHttpRequest();\r\nrequest.open(\"GET\", \"door_activate\" + nocache, true);\r\nrequest.send(null);\r\n}\r\n</script>\n");
+          client.print("</head>\r\n<body onload=\"GetSwitchState()\">\r\n<center><h1>ESP8266 Switch control</h1><hr>\r\n<div id=\"switch_txt\">\r\n</div>\r\n<br>\n");
+          client.print("Input password to control Switch.\r\n<br><br><form name=\"passcode\" onSubmit=\"GetCode()\"><input type=\"password\" name=\"password\" size='8' maxlength='4'>&nbsp;<input type=submit name=\"Submit\" value=\"Submit\" onClick=\"GetCode()\" style='height:22px; width:80px'></form><br><br>\n");
+  
+          if (HTTP_req.indexOf(pass_sent) > 0) {
+            GetCode();
+          }
+          if (codeOK == '0') {
+            client.print("<button type=\"button\" disabled style='height:50px; width:225px'>Push the Switch</button><br><br>\n");
+          }
+          if (codeOK == '1') {
+            client.print("<button type=\"button\" onclick=\"DoorActivate()\" style='height:50px; width:225px'>Push the Switch</button><br><br>\n");
+          }
+          //client.println(system_get_free_heap_size());
+          if (HTTP_req.indexOf("door_activate") > -1) {
+            // read switch state and send appropriate paragraph text
+            if (digitalRead(openClosePin) == LOW)
+            Pornire();
+            else
+            //(digitalRead(openClosePin) == HIGH)
+            Oprire();
+          }
+          //}
+          client.print("</body>\r\n</html>\n");
+          delay(0);
+        }
+ 
+        // display received HTTP request on serial port
+        Serial.println(HTTP_req);
+        HTTP_req = "";            // finished with request, empty string
+        break;
+      }
+      // every line of text received from the client ends with \r\n
+      if (c == '\n') {
+          // last character on line of received text
+          // starting new line with next character read
+          currentLineIsBlank = true;
+        }
+        else if (c != '\r') {
+          // a text character was received from client
+          currentLineIsBlank = false;
+        }
+      } // end if (client.available())
+  } // end while (client.connected())
+  delay(1);      // give the web browser time to receive the data
+  client.stop(); // close the connection
+  delay(0);
+}
+
+// send the state of the switch to the web browser
+void GetSwitchState(WiFiClient cl) {
+    if (digitalRead(openClosePin) == LOW) {
+      cl.println("<p>Switch is currently: <span style='background-color:#FF0000; font-size:18pt'>OFF</span></p>");
+    }
+    else {
+      cl.println("<p>Switch is currently: <span style='background-color:#00FF00; font-size:18pt'>ON</span></p>");
+    }
+  //  cl.println("<p>Clicks: ");
+    cl.println("Clicks: ");
+    cl.println(clicuri);
+    //cl.println("<p>");   
+  }
+ 
+  void GetCode() {
+      codeOK='1';
+  }
+ 
+  void Pornire() {
+    //digitalWrite(openClosePin, HIGH);
+    openClose = 1;
+    digitalWrite(openClosePin, openClose);
+    EEPROM.write(100, openClose);
+    clicuri = clicuri +1;
+    if (clicuri > 255) clicuri = 0;
+    EEPROM.write(101, clicuri);
+    EEPROM.commit(); //note here the commit!
+  }
+
+  void Oprire() {
+//    digitalWrite(openClosePin, LOW);
+    openClose = 0;
+    digitalWrite(openClosePin, openClose);
+    EEPROM.write(100, openClose);
+    clicuri = clicuri +1;
+    if (clicuri > 255) clicuri = 0;
+    EEPROM.write(101, clicuri);
+    EEPROM.commit(); //note here the commit!    
+  }
+
+void WIFI_Connect()
+{
+  digitalWrite(errorPin, HIGH);
+  WiFi.disconnect();
+  Serial.println("------------------");
+  Serial.println("||||||||||||||||||");
+  Serial.println("Booting Sketch...");
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.begin(_SSID, _PASS);
+    // Wait for connection
+  for (int i = 0; i < 25; i++)
+  {
+    if ( WiFi.status() != WL_CONNECTED ) {
+      delay ( 250 );
+      digitalWrite(errorPin, LOW);
+      Serial.print ( "." );
+      delay ( 250 );
+      digitalWrite(errorPin, HIGH);
+    }
+  }
+  digitalWrite(errorPin, LOW);
+}
